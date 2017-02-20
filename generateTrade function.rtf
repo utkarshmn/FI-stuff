@@ -1,0 +1,109 @@
+{\rtf1\ansi\ansicpg1252\cocoartf1504\cocoasubrtf600
+{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;\csgray\c100000;}
+\margl1440\margr1440\vieww10800\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 \
+\
+"""\
+def genTrades(data, trade, pca=True,fac=3, f=1):\
+    \
+    Returns trade time series, and residuals for curves and flies that are input. \
+    \
+    Performs a n-factor PCA on the data with freq of f.\
+\
+    ## If not enough values to perform PCA, exit.\
+    if lb > len(data.index.values):\
+        print("Not enough data for PCA. Exiting...")\
+        return\
+    final = \{\}\
+\
+    \
+    ## Relabel tenors for ease of use. \
+    tenors = sorted([int(x.strip()) for x in trade.split("s") if x])\
+    tenors = [str(i)+"y" for i in tenors]\
+    \
+    ## If an asset from a trade doesn't exist in the input dataframe, exit.\
+    dataCheck = [''.join(i for i in x if i.isdigit())+"y" for x in data.columns.values]\
+    if not set(tenors).issubset(set(dataCheck)):\
+        print("Data error.")\
+        return  \
+    \
+    tradeData = data\
+    tradeData.columns = dataCheck\
+    \
+    #### Perform n-factor PCA over past lb lookback periods with freq of f.\
+    pca = staticPCA(tradeData, n=fac, freq=f)\
+    eigenvectors = pca["evecs"]\
+    print (eigenvectors)\
+    newIndex = [''.join(i for i in x if i.isdigit())+"y" for x in eigenvectors.index.values]\
+    eigenvectors.index = newIndex\
+    \
+    ## Get residual data reconstruction for each factor\
+    kfacResid=dict.fromkeys(range(1, fac+1))\
+    for j in range(1,fac+1):\
+        kfacResid[j] = kfacReconstruct(tradeData, eigenvectors, j, cols=tenors)\
+    #print (kfacResid[2])\
+    \
+    tsCols = tenors + ["PV01 - "+trade, "PCA -"+trade, "121 - "+trade]\
+    tradeData = data[tenors].copy()\
+    #print (tradeData.tail())\
+    \
+    ## Save factors\
+    final["factors"] = kfacResid[3]["factorTS"]\
+\
+    ### Curve Trades\
+    if len(tenors) == 2:\
+        if len(eigenvectors.columns.values) < 2 or not set(tenors).issubset(newIndex):\
+            print ("Eigenvector or PV01 error.")\
+            return\
+        \
+        ### Save trades and weighted trades, and residuals \
+        wgts = returnRiskWgts(trade, eigenvectors)\
+        \
+        tradeData.loc[:,"PV01 - "+trade] = tradeData.apply(lambda x: x[tenors[1]] - x[tenors[0]], axis = 1)\
+        tradeData.loc[:,"PCA - "+trade] = tradeData.apply(lambda x: x[tenors[1]]*wgts[1] + x[tenors[0]]*wgts[0], axis=1)\
+        final["ts"] = tradeData\
+        pltTS = tradeData.loc[:,["PV01 - "+trade, "PCA - "+trade]].copy()\
+        pltTS.plot(title="curve price plot", secondary_y = "PCA - " + trade)\
+        \
+        PCAresidData = pd.DataFrame(index=tradeData.index.values)\
+        PV01residData = pd.DataFrame(index=tradeData.index.values)\
+        for j in range(1, fac+1):\
+            PV01residData[str(j)+"factor"] = kfacResid[j]["residuals"][tenors[1]] - kfacResid[j]["residuals"][tenors[0]]\
+            PCAresidData[str(j)+"factor"] = kfacResid[j]["residuals"][tenors[1]]*wgts[1] + wgts[0]*kfacResid[j]["residuals"][tenors[0]]\
+        PV01residData.plot(secondary_y="1factor")\
+        PCAresidData.plot(secondary_y="1factor")\
+        residDict = \{"PV01": PV01residData, "PCA": PCAresidData\}\
+        \
+        final["residuals"] = residDict\
+        \
+    if len(tenors) == 3:\
+        if len(eigenvectors.columns.values) < 2 or not set(tenors).issubset(newIndex):\
+            print ("Eigenvector or PV01 error.")\
+            return\
+        \
+        ### Save trades and weighted trades, and residuals \
+        wgts = returnRiskWgts(trade, eigenvectors)\
+        tradeData.loc[:,"PV01 - "+trade] = tradeData.apply(lambda x: 2*x[tenors[1]] - x[tenors[0]] - x[tenors[2]], axis = 1)\
+        tradeData.loc[:,"PCA - "+trade] = tradeData.apply(lambda x: 2*x[tenors[1]] + x[tenors[0]]*wgts[0] +x[tenors[2]]*wgts[2], axis=1)\
+        final["ts"] = tradeData\
+        pltTS = tradeData.loc[:,["PV01 - "+trade, "PCA - "+trade]].copy()\
+        pltTS.plot(title="fly price plot", secondary_y = "PCA - " + trade)\
+        \
+        PCAresidData = pd.DataFrame(index=tradeData.index.values)\
+        PV01residData = pd.DataFrame(index=tradeData.index.values)\
+        for j in range(1, fac+1):\
+            PV01residData[str(j)+"factor"] = 2*kfacResid[j]["residuals"][tenors[1]] - kfacResid[j]["residuals"][tenors[0]] - kfacResid[j]["residuals"][tenors[2]]\
+            PCAresidData[str(j)+"factor"] = 2*kfacResid[j]["residuals"][tenors[1]] + wgts[0]*kfacResid[j]["residuals"][tenors[0]] + wgts[2]*kfacResid[j]["residuals"][tenors[2]]\
+        PV01residData.plot(secondary_y="1factor", title="PV01 - Fly")\
+        PCAresidData.plot(secondary_y = "1factor", title = "PCA - Fly")\
+        residDict = \{"PV01": PV01residData, "PCA": PCAresidData\}\
+        \
+        final["residuals"] = residDict\
+        \
+    \
+    return final\
+"""}

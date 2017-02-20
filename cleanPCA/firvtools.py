@@ -9,6 +9,7 @@ import math
 import itertools as iter
 import datetime as dt
 import os
+import datetime as dt
 
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -17,16 +18,41 @@ from mpl_toolkits.mplot3d import Axes3D
 
 from sklearn.preprocessing import StandardScaler, normalize
 from sklearn.decomposition import PCA, KernelPCA
+from scipy.misc import comb
 
-from IPython.display import display, HTML
-import json
-def pretty(obj):
-    return json.dumps(obj, sort_keys=True, indent=2)
+
+rc('font', **{'family': 'serif', 'serif': ['Computer Modern']})
+rc('text', usetex=True)
+
 
 ## Directories
 cwd = os.getcwd()
 dataDir = cwd+"/depo/Data/"
 saveDir = cwd+"/depo/Outputs/"
+
+
+## Available Currencies
+
+
+def loadCurrencies(currencies):
+    fwd = {}
+    par = {}
+    for ccy in currencies:
+        fwd[ccy] = pd.read_pickle(dataDir+"fwd"+ccy)[::-1]
+        temp = pd.read_pickle(dataDir+ccy)[::-1]
+        if temp.columns.values[0][-1] != "y":
+            temp.rename(columns=lambda x: str(x[3:])+"y", inplace=True)
+        par[ccy] = temp
+        print ("Loaded "+ccy)
+    return fwd, par
+
+def matchTenors(c1, c2):
+    assets = [x for x in c1.columns.values if x in c2.columns.values]
+    r1 = c1.copy().reindex(columns=[assets])
+    r2 = c2.copy().reindex(columns=[assets])
+    return r1, r2
+
+
 
 ##PV01s
 
@@ -98,7 +124,11 @@ pv01d = {
   "6y": 573.08,
   "6y1y": 88.71,
   "7y": 661.79,
-  "7y3y": 253.2
+  "7y3y": 253.2,
+  "5y5y":432.75,
+  "10y5y":380.54,
+  "10y10y":714.89,
+  "20y20y":1000
 }
 
 
@@ -136,16 +166,43 @@ freqRules = {
   "W-WED": "W@WED"
 }
 
-freqString = {
-    "BA-":"Daily",
-    "W-":"Weekly",
-    "BQ-":"Quarterly",
-    "A":"Annual"
+freqDesc = {
+  "A-DEC": "Annual",
+  "AS-JAN": "Annual",
+  "B": "Daily",
+  "BA-APR": "Monthly",
+  "BA-AUG": "Monthly",
+  "BA-DEC": "Monthly",
+  "BA-FEB": "Monthly",
+  "BA-JAN": "Monthly",
+  "BA-JUL": "Monthly",
+  "BA-JUN": "Monthly",
+  "BA-MAR": "Monthly",
+  "BA-MAY": "Monthly",
+  "BA-NOV": "Monthly",
+  "BA-OCT": "Monthly",
+  "BA-SEP": "Monthly",
+  "BAS-JAN": "Semi-Annual",
+  "BM": "EOM",
+  "BQ-FEB": "Quarterly",
+  "BQ-JAN": "Quarterly",
+  "BQ-MAR": "Quarterly",
+  "L": "ms",
+  "Q-DEC": "Quarterly",
+  "T": "Min",
+  "U": "us",
+  "W-FRI": "Weekly",
+  "W-MON": "Weekly",
+  "W-SAT": "Weekly",
+  "W-SUN": "Weekly",
+  "W-THU": "Weekly",
+  "W-TUE": "Weekly",
+  "W-WED": "Weekly"
 }
+
+
 ###### PCA TOOLS ######
 
-def getPV01(maturity):
-    return bpv[mat.index(maturity)]
 
 def kfacReconstruct(data, evTable, k=3, cols = [], auto= 0):
     ## Auto reorients EVs and PCs
@@ -226,7 +283,7 @@ def pcReorient(data, factors, tol=2):
     
     return np.sign([pc1corr, pc2corr, pc3corr])
 
-def staticPCA(data, n=3, freq=1, corrW = 12, autoOrient=2, plot=True):
+def staticPCA(data, n=3, freq=1, corrW = 20, autoOrient=2):
     '''
     This function returns a dictionary with the following key value combinations:
     key    | Value
@@ -249,7 +306,7 @@ def staticPCA(data, n=3, freq=1, corrW = 12, autoOrient=2, plot=True):
     
     ## Covariance Matrix
     covM = raw.cov()
-    results["covM"] = covM
+    results["covM"] = covM[::-1]
     
     ## PCA
     evals, evecs = np.linalg.eig(covM)
@@ -287,6 +344,7 @@ def staticPCA(data, n=3, freq=1, corrW = 12, autoOrient=2, plot=True):
     results["facCR"] = facCR
     
     return results
+
 
 
 def rollingPCA(data, lb=30, n=3, corrW=12, skip=1):
@@ -345,7 +403,7 @@ def rollingPCA(data, lb=30, n=3, corrW=12, skip=1):
     
     return rollResult
 
-def cleanPCs(input, smoothing=0):
+def cleanPCs(input, smoothing=0, sdev = 2):
 	#### Function to help out the output of rollingPCAs. 
     newdf = pd.DataFrame(index=input.index.values, columns=input.columns.values)
     flag = "flipped"
@@ -371,8 +429,8 @@ def cleanPCs(input, smoothing=0):
                 flag = "same"
     
     if smoothing==1:
-        newdf = newdf[newdf.apply(lambda x: np.abs(x - x.mean()) / x.std() < 2.5).all(axis=1)]
-        newdf = newdf[newdf.apply(lambda x: np.abs(x - x.mean()) / x.std() < 2.5).all(axis=1)]
+        newdf = newdf[newdf.apply(lambda x: np.abs(x - x.mean()) / x.std() < sdev).all(axis=1)]
+        newdf = newdf[newdf.apply(lambda x: np.abs(x - x.mean()) / x.std() < sdev).all(axis=1)]
 
         
     return newdf
@@ -381,64 +439,18 @@ def cleanPCs(input, smoothing=0):
 
 ####### Trade Related #######
 
-
-def returnNotWgts(trade, evectors, bpvs=0):
-    ### Returns notionals to use in PCA weighted butterflies. 
-    tenors = sorted([int(x.strip()) for x in trade.split("s") if x])
-    tenors = [str(i)+"y" for i in tenors]
-    ## re-index evectors:
-    newIndex = [''.join(i for i in x if i.isdigit())+"y" for x in evectors.index.values]
-    evectors.index = newIndex
-    
-    if bpvs == 0:
-        return returnRiskWgts(trade, evectors)
-    
-    ## curves
-    if len(tenors)==2:
-        ## longer tenor = 1
-        short = tenors[0]
-        long = tenors[1]
-        es = evectors.at[short, "PC1"]
-        el = evectors.at[long, "PC1"]
-        return [-bpvs[long]/bpvs[short]*el/es, 1]
-    
-    if len(tenors)==3:
-        ## get belly and wings. Assume belly = 1.
-        belly = tenors[1]
-        wings = [w for w in tenors if w not in belly]
-        ## get eigenvector subset
+def getWgts(trade, evectors,bpvs=0):
+    ### Returns risk to use in trades
+    eVec = evectors.copy()
+    if "-" in trade:
+        tenors = trade.split("-")
         
-        #LHS
-        wingFactors = pd.DataFrame(index=wings)
-        wingFactors = wingFactors.join(evectors).ix[:,:-1].transpose()
-        wingRisk = np.diag([bpvs[x] for x in wings])
-        coeff = wingFactors.dot(wingRisk)
-        invcoeff = np.linalg.pinv(coeff)
-        
-        #RHS
-        bellyFactor = pd.DataFrame(index=[belly])
-        bellyFactor = bellyFactor.join(evectors).ix[:,:-1].transpose()
-            
-        bellyFactor.loc[:] *= -bpvs[belly]
-                
-        wingWeights = list(np.ravel(invcoeff.dot(bellyFactor)))
-        wingWeights.insert(1, 1)
-        
-        
-        return wingWeights
     else:
-        print("Oops. Not enough, or too many instruments.")
-        
-        
-    return
-
-def returnRiskWgts(trade, evectors):
-    ### Returns BPVs to use in PCA weighted butterflies. 
-    tenors = sorted([int(x.strip()) for x in trade.split("s") if x])
-    tenors = [str(i)+"y" for i in tenors]
-    ## re-index evectors:
-    newIndex = [''.join(i for i in x if i.isdigit())+"y" for x in evectors.index.values]
-    evectors.index = newIndex
+        tenors = sorted([int(x.strip()) for x in trade.split("s") if x])
+        tenors = [str(i)+"y" for i in tenors]
+        ## re-index evectors:
+        newIndex = [''.join(i for i in x if i.isdigit())+"y" for x in evectors.index.values]
+        eVec.index = newIndex
 
     if len(tenors)==2:
         short = tenors[0]
@@ -446,28 +458,76 @@ def returnRiskWgts(trade, evectors):
         es = evectors.at[short, "PC1"]
         el = evectors.at[long, "PC1"]
         return [-el/es, 1]
+        
     
     if len(tenors)==3:
         belly = tenors[1]
         wings = [w for w in tenors if w not in belly]
-        
         wingFactors = pd.DataFrame(index=wings)
-        wingFactors = wingFactors.join(evectors).ix[:,:-1].transpose()
+        wingFactors = wingFactors.join(eVec).ix[:,:-1].transpose()
         bellyFactor = pd.DataFrame(index=[belly])
-        bellyFactor = bellyFactor.join(evectors).ix[:,:-1].transpose()
-        
+        bellyFactor = bellyFactor.join(eVec).ix[:,:-1].transpose()
         invcoeff = np.linalg.pinv(wingFactors)
         bellyFactor.loc[:] *= -1
         rhs = invcoeff.dot(bellyFactor)
-        rhs = list(np.ravel(rhs))
-        rhs.insert(1, 1)
+        rhs = [2*x for x in list(np.ravel(rhs))]
+        rhs.insert(1, 2)
         
         return rhs
     else:
         print("Oops. Not enough, or too many instruments.")
     return
 
+def genTrade(trade, data, pcaResult):
+    eVec = pcaResult["evecs"].copy()
+    
+    
+    if "-" in trade:
+        tenors = trade.split("-")
+        
+    else:
+        tenors = sorted([int(x.strip()) for x in trade.split("s") if x])
+        tenors = [str(i)+"y" for i in tenors]
+        ## re-index evectors:
+        newIndex = [''.join(i for i in x if i.isdigit())+"y" for x in eVec.index.values]
+        eVec.index = newIndex
+        
+    pcaWgts = getWgts(trade, eVec)
+    
+    result = data[tenors].copy()
+    result["PCA "+trade] = result.dot(pcaWgts)
+    
+    if len(tenors) == 2:
+        result["Standard "+trade] = result[tenors[1]] - result[tenors[0]]
+    elif len(tenors)==3:
+        legs = data[tenors].copy()
+        result["Standard "+trade] = legs.dot(np.array([-1, 2, -1]))
+    
+    residuals = pcaResult["resid"][tenors].copy()
+    residuals["PCA "+trade+" Resid."] = residuals.dot(pcaWgts)
+    if len(tenors) == 2:
+        residuals["Standard "+trade+" Resid."] = residuals[tenors[1]] - residuals[tenors[0]]
+    elif len(tenors)==3:
+        rlegs = residuals[tenors].copy()
+        residuals["Standard "+trade+" Resid."] = rlegs.dot(np.array([-1, 2, -1]))    
+    
+    
+    return result, residuals
 
+def genStdParTrade(trade, data):
+    result = pd.DataFrame(index=data.index.values)
+    if trade.count("y")==1:
+        return data[trade]
+    elif trade.count("s")==2:
+        tenors = sorted([int(x.strip()) for x in trade.split("s") if x])
+        tenors = [str(i)+"y" for i in tenors]
+        result[trade] = data[tenors[1]] - data[tenors[0]]
+    elif trade.count("s")==3:
+        tenors = sorted([int(x.strip()) for x in trade.split("s") if x])
+        tenors = [str(i)+"y" for i in tenors] 
+        legs = data[tenors].copy()
+        result[trade] = legs.dot(np.array([-1, 2, -1]))
+    return (result)
 
 
 
@@ -505,5 +565,277 @@ def pcaSnapshot(dates, data, lb=30, n=3,orient=True, vec=[], tol=1.5):
         accumEvecs[pc].rename(columns=lambda x: x[3:], inplace=True)
     
     return evalues, accumEvecs
+
+def getDataSubset(raw, start, end, scale = 1, resample=1):
+    subset = raw[start:end] *scale
+    subset = subset.iloc[::resample, :]
+    return subset
+
+def plotResidual(residTS, ax, k=3):
+    assets = residTS.columns.values
+    xvals = range(len(assets))
+
+    relVal = pd.DataFrame()
+    relVal = residTS.ix[[-1, -5, -20, -60]]
+    relVal.index = ["1d", "1w", "1m", "3m"]
+    relVal = relVal.transpose()
+    
+    
+    
+    lday = ax.bar(xvals, relVal["1d"], alpha=0.5,color='#256189', align='center', width=0.5, label='1d')
+    ax.set_xticks(xvals)
+    ax.set_xticklabels(assets)
+    ax.grid()
+    s = 25
+    lwk = ax.scatter(xvals, relVal["1w"], color='#B20F2C', marker = "o", s=2*s, label='1w')
+    lmnth = ax.scatter(xvals, relVal["1m"], color='b', marker = "x", s=1.5*s, label="1m")
+    lquart = ax.scatter(xvals, relVal["3m"], color='g', marker = "D", s=1.5*s, label="3m")
+    ax.axhline(0, color="grey")
+    
+    ax.set_axis_bgcolor('#f8fcff')
+    ax.set_ylabel("Residual (bps)")
+    ax.set_title(str(k)+" Factor Residuals")
+
+    return ([lday, lwk, lmnth, lquart])
+
+def plotPC(pca, ax, k=3, rawPx = None, comp=None):
+    import matplotlib.dates as mdates
+    myFmt = mdates.DateFormatter('%b %y')
+    ax.patch.set_facecolor('#FAFAFA')
+    ax.patch.set_alpha(1.0)
+
+
+    pcx = pca["facTS"].index.values
+    pcts = pca["facTS"]["PC"+str(k)]
+    plt.xticks(rotation=30)
+    pcplt = ax.plot(pcx, pcts, 'g-', label="PC"+str(k)+" - "+"%0.2f"%pcts.ix[-1, 0])
+    ax.xaxis.set_major_formatter(myFmt)
+    ax.grid()
+    ax.axhline(0, color="grey")
+    ax.set_title("PC"+str(k)+" vs. "+comp)
+
+    if len(rawPx.columns.values) > 1 and comp != None:
+        plt.xticks(rotation=30)
+        cTrade = genStdParTrade(comp, rawPx)
+        axr = ax.twinx()
+        tradePlt = axr.plot(pcx, cTrade, 'b--', label=comp+" (rhs) - "+"%0.2f"%cTrade.ix[-1,0])
+        lns = tradePlt+pcplt
+        labs = [l.get_label() for l in lns]
+        ax.legend(lns, labs, loc=0, frameon=True, framealpha=0.7)
+        return
+
+    ax.legend(frameon=True, framealpha=0.7)
+    return
+
+
+def plotSummary(ccy, ctype, start, end, parD, fwdD=None, 
+    tenors=None, scale=1, resample=1, pcCorr=20, AR=2, cTrades = ["7y", "5s30s", "2s5s10s"]):
+    par = parD
+    fwd = fwdD
+    import seaborn as sns
+
+
+    ## Check multiCurrency ###
+    if ccy.count("-")==1:
+        c1, c2 = ccy.split("-")
+        stDate = start
+        edDate = end
+        ctype = ctype.upper()
+
+        try:
+            testCcyLoad = par[c1]
+            testCcyLoad = par[c2]
+        except:
+            print ("Currencies not loaded properly.")
+            return
+
+        if ctype == "PAR":
+            try:
+                rawPar1 = getDataSubset(par[c1], stDate, edDate, scale, resample)
+                rawPar2 = getDataSubset(par[c2], stDate, edDate, scale, resample)
+                rawPar1, rawPar2 = matchTenors(rawPar1, rawPar2)
+                if tenors != None:
+                    rawPar1 = rawPar1.reindex(columns=[tenors])
+                    rawPar2 = rawPar2.reindex(columns=[tenors])
+                rawPar = rawPar1.subtract(rawPar2)
+
+            except:
+                print ("Invalid Tenors.")
+                return
+            pca1 = staticPCA(rawPar, freq=1, n=1, corrW = pcCorr)
+            pca2 = staticPCA(rawPar, freq=1, n=2, corrW = pcCorr)
+            pca3 = staticPCA(rawPar, freq=1, n=3, corrW = pcCorr, autoOrient=AR)
+            cDesc = "Par"
+        elif ctype == "FWD":
+            try:
+                rawPar1 = getDataSubset(par[c1], stDate, edDate, scale, resample)
+                rawPar2 = getDataSubset(par[c2], stDate, edDate, scale, resample)
+                rawPar1, rawPar2 = matchTenors(rawPar1, rawPar2)
+                rawFwd1 = getDataSubset(fwd[c1], stDate, edDate, scale, resample)
+                rawFwd2 = getDataSubset(fwd[c2], stDate, edDate, scale, resample)
+                rawFwd1, rawFwd2 = matchTenors(rawFwd1, rawFwd2)
+                if tenors != None:
+                    rawFwd1 = rawFwd1.reindex(columns=[tenors])
+                    rawFwd2 = rawFwd2.reindex(columns=[tenors])
+                    
+                rawPar = rawPar1.subtract(rawPar2)
+                rawFwd = rawFwd1.subtract(rawFwd2)
+            except:
+                print ("Invalid Tenors.")
+                return
+            pca1 = staticPCA(rawFwd, freq=1, n=1, corrW = pcCorr)
+            pca2 = staticPCA(rawFwd, freq=1, n=2, corrW = pcCorr)
+            pca3 = staticPCA(rawFwd, freq=1, n=3, corrW = pcCorr, autoOrient=AR)
+            cDesc = "Forwards"
+        else:
+            print ("Incorrect Curve Type.")
+            return        
+    else:
+        stDate = start
+        edDate = end
+        ctype = ctype.upper()
+
+        try:
+            testCcyLoad = par[ccy]
+        except:
+            print ("Currencies not loaded properly.")
+            return
+
+        if ctype == "PAR":
+            try:
+                rawPar = getDataSubset(par[ccy], stDate, edDate, scale, resample)
+                if tenors != None:
+                    rawPar = rawPar.reindex(columns=[tenors])
+
+            except:
+                print ("Invalid Tenors.")
+                return
+            pca1 = staticPCA(rawPar, freq=1, n=1, corrW = pcCorr)
+            pca2 = staticPCA(rawPar, freq=1, n=2, corrW = pcCorr)
+            pca3 = staticPCA(rawPar, freq=1, n=3, corrW = pcCorr)
+            cDesc = "Par"
+        elif ctype == "FWD":
+            try:
+                rawPar = getDataSubset(par[ccy], stDate, edDate, scale, resample)
+                rawFwd = getDataSubset(fwd[ccy], stDate, edDate, scale, resample)
+                print (rawFwd.columns.values)
+                if tenors != None:
+                    rawPar = rawPar.reindex(columns=[tenors])
+            except:
+                print ("Invalid Tenors.")
+                return
+            pca1 = staticPCA(rawFwd, freq=1, n=1, corrW = pcCorr)
+            pca2 = staticPCA(rawFwd, freq=1, n=2, corrW = pcCorr)
+            pca3 = staticPCA(rawFwd, freq=1, n=3, corrW = pcCorr)
+            cDesc = "Forwards"
+        else:
+            print ("Incorrect Curve Type.")
+            return
+    ######################################################################
+    
+    
+    fig = plt.figure(figsize=(16, 24), dpi=400)    
+    plt.style.use('seaborn-white')
+
+    ## Cov ax
+    ax1 = plt.subplot2grid((5, 3), (4, 0), colspan=2)
+    covM = pca3["covM"]
+    sns.heatmap(covM/covM.values.max()*100,annot=True, linewidths=.25, fmt='.0f', 
+                cmap = cm.YlGnBu, vmin=0, vmax=100, ax=ax1)
+    ax1.set_title("Covariance Matrix")
+    
+    
+    ## eigenvealues ######################################################
+    ax2 = plt.subplot2grid((5, 3), (4, 2), colspan=1)
+    
+    nevals = pca3["evals"]
+    cumExp = np.cumsum(nevals)
+    
+    ax2.bar(range(3), nevals, alpha=0.5, align='center', label='individual expl. var.')
+    ax2.step(range(3), cumExp, where='mid', label='cumulative expl. var.')
+    ax2.set_xticks(range(3))
+    ax2.set_xticklabels(["PC1", "PC2", "PC3"])
+    ax2.set_xlabel('Principal Components')
+    ax2.set_ylabel('Explained Variance')
+    ax2.legend(loc="best")
+    ax2.set_title("Explained Variance",)
+    ax2.grid()
+
+    rects = ax2.patches
+    labels = [str(round(i, 1))+" %" for i in nevals]
+
+    for rect,label in zip(rects, labels):
+        height = rect.get_height()
+        ax2.text(rect.get_x() + rect.get_width()/2, height + 3, label, ha='center', va='bottom')
+
+    ## eigenvectors ######################################################
+    
+    ax3 = plt.subplot2grid((5, 3), (3, 0), colspan=2)
+    evTable = pca3["evecs"]
+    
+    ax3.grid()
+    bwidth = 0.25
+    assets = evTable.index.values
+    adjpos = [-bwidth, 0, bwidth]
+    colors = ['#2980b9', '#58D3F7', '#16a085']
+    ind = np.arange(len(assets))
+    for col in range(len(evTable.columns)):
+        ax3.bar(ind+adjpos[col], evTable.ix[:,col],alpha=0.75, width=bwidth,color=colors[col], align="center")
+    ax3.set_xlabel('Maturity')
+    ax3.set_ylabel('Sensitivity')
+    ax3.set_xticks(range(len(assets)))
+    ax3.set_xticklabels(assets)
+    ax3.legend(["PC1", "PC2", "PC3"], loc="lower right")
+    ax3.set_title("Eigenvectors")
+   
+    ## residuals #########################################################
+    
+    PCAs = [pca1, pca2, pca3]
+
+    for i in range(len(PCAs)):
+        ax = plt.subplot2grid((5, 3), (len(PCAs)-i-1, 0), colspan=2, rowspan=1)
+        residLines = plotResidual(PCAs[i]["resid"], ax, k=i+1)
+
+    ###############################################################################
+    import matplotlib.dates as mdates
+    myFmt = mdates.DateFormatter('%b %y')
+
+    ## Correlations
+    corrs = pca3["facCR"]
+    #print (corrs)
+    ax7 = plt.subplot2grid((5, 3), (3, 2), colspan=1, rowspan=1)
+    corrx = corrs.index.values
+    ax7.plot(corrx, corrs.ix[:,0], corrx, corrs.ix[:, 1], corrx, corrs.ix[:, 2])
+    ax7.grid()
+    lastCorrs = [corrs.ix[-1, i] for i in range(len(corrs.columns.values))]
+    lgnd = [x + " (%0.1f)"%(y) for x, y in zip(corrs.columns.values, lastCorrs)]
+    ax7.legend(lgnd, loc="lower left",frameon=True, framealpha=0.7)
+    ax7.patch.set_facecolor('#F4AFAB')
+    ax7.patch.set_alpha(0.2)
+    ax7.axhline(0, color="grey")
+    ax7.set_title(str(pcCorr)+" period rolling correlation")
+    plt.xticks(rotation=30)
+    ax7.xaxis.set_major_formatter(myFmt)
+
+    for i in range(len(PCAs)):
+        ax = plt.subplot2grid((5, 3), (len(PCAs)-1-i, 2), colspan=1, rowspan=1)
+        plotPC(pca3, ax, i+1, rawPar, cTrades[i])
+        
+    freq = freqDesc[pd.infer_freq(pca3["rawDat"].index)]
+        
+    fig.suptitle("%s PCA Summary"%
+                 (ccy+" "+cDesc), fontsize=22, fontweight="bold", 
+                 bbox={'facecolor':'black', 'alpha':0.2, 'pad':18})
+    fig.subplots_adjust(top=0.94)
+
+    fig.text(0.5, 0.965,'%s to %s (%s)'%(stDate.strftime("%d %b %y"), edDate.strftime("%d %b %y"), freq+" data"), 
+             ha='center', va='center', transform=ax3.transAxes, fontsize=10)
+    plt.figlegend(residLines, ["1p", "5p", "20p", "60p"], frameon=True,loc="upper center",
+                 bbox_to_anchor=[0.095, 0.84], framealpha=0.65)
+    
+    
+    
+    return fig, pca3
+
 
 
